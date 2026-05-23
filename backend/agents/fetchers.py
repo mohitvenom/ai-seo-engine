@@ -37,7 +37,9 @@ def fetch_autocomplete(query: str) -> list:
 
 def fetch_trends(query: str) -> dict:
     try:
-        pt = TrendReq(hl="en-US", tz=360)
+        import time
+        time.sleep(2)  # avoid rate limiting
+        pt = TrendReq(hl="en-US", tz=360, timeout=(10, 25), retries=2, backoff_factor=0.5)
         pt.build_payload([query], timeframe="today 3-m")
         interest = pt.interest_over_time()
         score = round(float(interest[query].mean()), 1) if not interest.empty else 0.0
@@ -67,15 +69,32 @@ def fetch_competitor_meta(urls: list) -> dict:
     return {"titles": titles, "descriptions": descs}
 
 async def gather_keyword_data(product: str) -> dict:
+    from database import get_cached_trends, save_trends_cache
+
     loop = asyncio.get_event_loop()
-    serp, autocomplete, trends = await asyncio.gather(
-        loop.run_in_executor(None, fetch_serp_data, product),
-        loop.run_in_executor(None, fetch_autocomplete, product),
-        loop.run_in_executor(None, fetch_trends, product),
-    )
+
+    # Check MongoDB cache first before calling pytrends
+    cached = await get_cached_trends(product)
+    if cached:
+        trends = cached
+        serp, autocomplete = await asyncio.gather(
+            loop.run_in_executor(None, fetch_serp_data, product),
+            loop.run_in_executor(None, fetch_autocomplete, product),
+        )
+    else:
+        serp, autocomplete, trends = await asyncio.gather(
+            loop.run_in_executor(None, fetch_serp_data, product),
+            loop.run_in_executor(None, fetch_autocomplete, product),
+            loop.run_in_executor(None, fetch_trends, product),
+        )
+        # Save to cache only if we got real data
+        if trends["score"] > 0 or trends["rising"]:
+            await save_trends_cache(product, trends["score"], trends["rising"])
+
     return {"serp": serp, "autocomplete": autocomplete, "trends": trends}
 
 async def gather_meta_data(product: str, urls: list) -> dict:
     loop = asyncio.get_event_loop()
     competitor_meta = await loop.run_in_executor(None, fetch_competitor_meta, urls)
     return {"competitor_meta": competitor_meta}
+    

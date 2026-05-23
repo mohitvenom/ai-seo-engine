@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { runPipeline } from "./api";
+import { runPipeline, fetchHistory, deleteHistory } from "./api";
 
 const AGENTS = [
   { id: "keywords", name: "Keyword Research Agent", icon: "🔍", color: "#6366f1" },
@@ -40,8 +40,8 @@ const toCSV = (product, category, data) => {
   rows.push(["Description", "Long", data.description.longDescription]);
   data.description.bulletPoints.forEach(b => rows.push(["Description", "Bullet", b]));
   rows.push(["Description", "CTA", data.description.cta]);
-  rows.push(["Schema", "JSON-LD", JSON.stringify(data.schema.jsonLd)]);
-  rows.push(["Schema", "Breadcrumb", data.schema.breadcrumb.join(" > ")]);
+  rows.push(["Schema", "JSON-LD", JSON.stringify(data.schemaMarkup?.jsonLd || {})]);
+  rows.push(["Schema", "Breadcrumb", (data.schemaMarkup?.breadcrumb || []).join(" > ")]);
   const csv = rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
   const blob = new Blob([csv], { type: "text/csv" });
   const url = URL.createObjectURL(blob);
@@ -53,6 +53,7 @@ const toCSV = (product, category, data) => {
 };
 
 export default function App() {
+  // ── all state at the top ──────────────────────────────
   const [product, setProduct] = useState("");
   const [category, setCategory] = useState("");
   const [provider, setProvider] = useState("openai");
@@ -60,17 +61,24 @@ export default function App() {
   const [activeAgent, setActiveAgent] = useState(null);
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
-  const [history, setHistory] = useState(() => {
-    try { return JSON.parse(localStorage.getItem("seo_history") || "[]"); } catch { return []; }
-  });
   const [showHistory, setShowHistory] = useState(false);
+  const [history, setHistory] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [theme, setTheme] = useState("dark");
   const t = THEMES[theme];
 
+  // ── load history from MongoDB when panel opens ────────
   useEffect(() => {
-    localStorage.setItem("seo_history", JSON.stringify(history.slice(0, 20)));
-  }, [history]);
+    if (showHistory) {
+      setHistoryLoading(true);
+      fetchHistory()
+        .then(setHistory)
+        .catch(console.error)
+        .finally(() => setHistoryLoading(false));
+    }
+  }, [showHistory]);
 
+  // ── handlers ─────────────────────────────────────────
   const handleRun = async () => {
     if (!product.trim()) return;
     setLoading(true); setError(null); setData(null); setActiveAgent(null);
@@ -78,7 +86,12 @@ export default function App() {
       const res = await runPipeline(product, category, provider);
       setData(res);
       setActiveAgent("keywords");
-      const entry = { id: Date.now(), product, category: category || "General", provider, data: res, ts: new Date().toLocaleString() };
+      const entry = {
+        _id: res._id || Date.now().toString(),
+        product, category: category || "General",
+        provider, result: res,
+        ts: new Date().toLocaleString()
+      };
       setHistory(prev => [entry, ...prev.slice(0, 19)]);
     } catch (e) {
       setError(e.message);
@@ -87,22 +100,30 @@ export default function App() {
     }
   };
 
-  const loadHistory = (entry) => {
+  const loadHistoryEntry = (entry) => {
     setProduct(entry.product);
     setCategory(entry.category);
     setProvider(entry.provider);
-    setData(entry.data);
+    setData(entry.result || entry.data);
     setActiveAgent("keywords");
     setShowHistory(false);
   };
 
-  const deleteHistory = (id, e) => {
+  const deleteHistoryEntry = async (id, e) => {
     e.stopPropagation();
-    setHistory(prev => prev.filter(h => h.id !== id));
+    try {
+      await deleteHistory(id);
+      setHistory(prev => prev.filter(h => h._id !== id));
+    } catch (err) {
+      console.error("Delete failed:", err);
+    }
   };
 
-  const copy = txt => navigator.clipboard.writeText(typeof txt === "object" ? JSON.stringify(txt, null, 2) : txt);
+  const copy = txt => navigator.clipboard.writeText(
+    typeof txt === "object" ? JSON.stringify(txt, null, 2) : txt
+  );
 
+  // ── render ────────────────────────────────────────────
   return (
     <div style={{ minHeight: "100vh", background: t.bg, color: t.text, fontFamily: "Inter, sans-serif", padding: 24, transition: "all 0.3s" }}>
 
@@ -114,9 +135,8 @@ export default function App() {
         </h1>
         <p style={{ color: t.subtext, fontSize: 13, marginTop: 6 }}>4 specialized agents · FastAPI backend · React dashboard</p>
 
-        {/* Controls Row */}
+        {/* Controls */}
         <div style={{ display: "flex", justifyContent: "center", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
-          {/* Provider Toggle */}
           <div style={{ display: "inline-flex", background: t.card, border: `1px solid ${t.border}`, borderRadius: 8, overflow: "hidden" }}>
             {["openai", "gemini"].map(p => (
               <button key={p} onClick={() => setProvider(p)}
@@ -125,14 +145,10 @@ export default function App() {
               </button>
             ))}
           </div>
-
-          {/* Theme Toggle */}
           <button onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
             style={{ padding: "7px 16px", background: t.card, border: `1px solid ${t.border}`, borderRadius: 8, color: t.text, fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
             {theme === "dark" ? "☀️ Light Mode" : "🌙 Dark Mode"}
           </button>
-
-          {/* History Button */}
           <button onClick={() => setShowHistory(!showHistory)}
             style={{ padding: "7px 16px", background: showHistory ? "#6366f122" : t.card, border: `1px solid ${showHistory ? "#6366f1" : t.border}`, borderRadius: 8, color: showHistory ? "#6366f1" : t.text, fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
             🕘 History {history.length > 0 && `(${history.length})`}
@@ -149,25 +165,27 @@ export default function App() {
               <button onClick={() => setHistory([])} style={{ fontSize: 11, color: "#f87171", background: "transparent", border: "none", cursor: "pointer" }}>Clear All</button>
             )}
           </div>
-          {history.length === 0 ? (
+          {historyLoading ? (
+            <div style={{ padding: 20, textAlign: "center", color: t.dim, fontSize: 13 }}>Loading...</div>
+          ) : history.length === 0 ? (
             <div style={{ padding: 20, textAlign: "center", color: t.dim, fontSize: 13 }}>No history yet</div>
           ) : (
             <div style={{ maxHeight: 280, overflowY: "auto" }}>
               {history.map(h => (
-                <div key={h.id} onClick={() => loadHistory(h)}
-                  style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 18px", borderBottom: `1px solid ${t.border}`, cursor: "pointer", transition: "background 0.2s" }}
+                <div key={h._id} onClick={() => loadHistoryEntry(h)}
+                  style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 18px", borderBottom: `1px solid ${t.border}`, cursor: "pointer" }}
                   onMouseEnter={e => e.currentTarget.style.background = t.muted}
                   onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
                   <div>
                     <div style={{ fontWeight: 600, fontSize: 13 }}>{h.product}</div>
-                    <div style={{ fontSize: 11, color: t.subtext, marginTop: 2 }}>{h.category} · {h.provider === "openai" ? "GPT-4o Mini" : "Gemini 2.5 Flash"} · {h.ts}</div>
+                    <div style={{ fontSize: 11, color: t.subtext, marginTop: 2 }}>{h.category} · {h.provider === "openai" ? "GPT-4o Mini" : "Gemini 2.5 Flash"} · {h.ts || h.createdAt}</div>
                   </div>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                    <button onClick={(e) => { e.stopPropagation(); toCSV(h.product, h.category, h.data); }}
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button onClick={(e) => { e.stopPropagation(); toCSV(h.product, h.category, h.result || h.data); }}
                       style={{ padding: "5px 10px", background: "#6366f122", border: "1px solid #6366f144", borderRadius: 6, color: "#6366f1", fontSize: 11, cursor: "pointer" }}>
                       ⬇ CSV
                     </button>
-                    <button onClick={(e) => deleteHistory(h.id, e)}
+                    <button onClick={(e) => deleteHistoryEntry(h._id, e)}
                       style={{ padding: "5px 8px", background: "transparent", border: "none", color: "#f87171", fontSize: 13, cursor: "pointer" }}>✕</button>
                   </div>
                 </div>
@@ -180,10 +198,12 @@ export default function App() {
       {/* Input */}
       <div style={{ maxWidth: 640, margin: "0 auto 32px", background: t.card, border: `1px solid ${t.border}`, borderRadius: 12, padding: 20 }}>
         <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
-          <input value={product} onChange={e => setProduct(e.target.value)} onKeyDown={e => e.key === "Enter" && !loading && handleRun()}
+          <input value={product} onChange={e => setProduct(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && !loading && handleRun()}
             placeholder="Product name (e.g. Wireless Headphones)"
             style={{ flex: 2, background: t.input, border: `1px solid ${t.inputBorder}`, borderRadius: 8, padding: "10px 14px", color: t.text, fontSize: 13, outline: "none" }} />
-          <input value={category} onChange={e => setCategory(e.target.value)} placeholder="Category (optional)"
+          <input value={category} onChange={e => setCategory(e.target.value)}
+            placeholder="Category (optional)"
             style={{ flex: 1, background: t.input, border: `1px solid ${t.inputBorder}`, borderRadius: 8, padding: "10px 14px", color: t.text, fontSize: 13, outline: "none" }} />
         </div>
         <div style={{ display: "flex", gap: 8 }}>
@@ -192,7 +212,9 @@ export default function App() {
             {loading ? "⚡ Running Pipeline..." : "🚀 Run Agentic Pipeline"}
           </button>
           <button onClick={() => { setData(null); setActiveAgent(null); setProduct(""); setCategory(""); setError(null); }}
-            style={{ padding: "11px 16px", borderRadius: 8, border: `1px solid ${t.inputBorder}`, background: "transparent", color: t.subtext, fontSize: 13, cursor: "pointer" }}>Reset</button>
+            style={{ padding: "11px 16px", borderRadius: 8, border: `1px solid ${t.inputBorder}`, background: "transparent", color: t.subtext, fontSize: 13, cursor: "pointer" }}>
+            Reset
+          </button>
           {data && (
             <button onClick={() => toCSV(product, category, data)}
               style={{ padding: "11px 16px", borderRadius: 8, border: "1px solid #6366f144", background: "#6366f122", color: "#6366f1", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
@@ -204,7 +226,7 @@ export default function App() {
       </div>
 
       {/* Pipeline Visual */}
-      <div style={{ maxWidth: 860, margin: "0 auto 28px", display: "flex", alignItems: "center", justifyContent: "center", gap: 0, flexWrap: "wrap" }}>
+      <div style={{ maxWidth: 860, margin: "0 auto 28px", display: "flex", alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
         {AGENTS.map((a, i) => {
           const done = !!data;
           const active = activeAgent === a.id;
@@ -243,7 +265,7 @@ export default function App() {
             {activeAgent === "keywords" && <KeywordPanel d={data.keywords} copy={copy} t={t} />}
             {activeAgent === "meta" && <MetaPanel d={data.meta} copy={copy} t={t} />}
             {activeAgent === "description" && <DescPanel d={data.description} copy={copy} t={t} />}
-            {activeAgent === "schema" && <SchemaPanel d={data.schema} copy={copy} t={t} />}
+            {activeAgent === "schema" && <SchemaPanel d={data.schemaMarkup} copy={copy} t={t} />}
           </div>
         </div>
       )}
@@ -256,6 +278,8 @@ export default function App() {
     </div>
   );
 }
+
+// ── sub-components ────────────────────────────────────────
 
 const S = ({ title, color = "#6366f1", children }) => (
   <div style={{ marginBottom: 18 }}>
@@ -274,7 +298,6 @@ const CopyBtn = ({ onClick }) => (
 
 const KeywordPanel = ({ d, copy, t }) => (
   <div>
-    {/* Trend Score Badge */}
     {d.trendScore !== undefined && (
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18, padding: "10px 14px", background: "#6366f111", border: "1px solid #6366f133", borderRadius: 8 }}>
         <span style={{ fontSize: 11, fontWeight: 700, color: "#6366f1", textTransform: "uppercase", letterSpacing: 1 }}>📈 Google Trend Score</span>
@@ -282,34 +305,34 @@ const KeywordPanel = ({ d, copy, t }) => (
         <span style={{ fontSize: 11, color: t.subtext }}>/100</span>
       </div>
     )}
-    <S title="Primary Keywords"><div>{d.primary.map((k, i) => <Tag key={i} text={k} bg="#6366f133" tc="#a5b4fc" />)}</div></S>
-    <S title="Secondary Keywords"><div>{d.secondary.map((k, i) => <Tag key={i} text={k} bg="#8b5cf633" tc="#c4b5fd" />)}</div></S>
-    <S title="Long-Tail Keywords"><div>{d.longTail.map((k, i) => <Tag key={i} text={k} bg="#a855f733" tc="#d8b4fe" />)}</div></S>
+    <S title="Primary Keywords"><div>{(d.primary || []).map((k, i) => <Tag key={i} text={k} bg="#6366f133" tc="#a5b4fc" />)}</div></S>
+    <S title="Secondary Keywords"><div>{(d.secondary || []).map((k, i) => <Tag key={i} text={k} bg="#8b5cf633" tc="#c4b5fd" />)}</div></S>
+    <S title="Long-Tail Keywords"><div>{(d.longTail || []).map((k, i) => <Tag key={i} text={k} bg="#a855f733" tc="#d8b4fe" />)}</div></S>
     <S title="Search Intent">
-      {Object.entries(d.intent).map(([k, v]) => (
+      {Object.entries(d.intent || {}).map(([k, v]) => (
         <div key={k} style={{ marginBottom: 8 }}>
           <span style={{ fontSize: 10, fontWeight: 700, color: "#6366f1", letterSpacing: 1, textTransform: "uppercase" }}>{k}: </span>
-          {v.map((kw, i) => <Tag key={i} text={kw} bg="#6366f122" tc="#a5b4fc" />)}
+          {(v || []).map((kw, i) => <Tag key={i} text={kw} bg="#6366f122" tc="#a5b4fc" />)}
         </div>
       ))}
     </S>
     <S title="Voice Search / PAA">
-      {(d.paaQuestions?.length ? d.paaQuestions : d.voiceSearch).map((q, i) => (
+      {(d.paaQuestions?.length ? d.paaQuestions : d.voiceSearch || []).map((q, i) => (
         <div key={i} style={{ padding: "7px 12px", background: t.input, borderRadius: 6, marginBottom: 6, fontSize: 13, color: "#c4b5fd" }}>🎙️ {q}</div>
       ))}
     </S>
     {d.risingQueries?.length > 0 && (
-      <S title="🚀 Rising Queries (Real Google Data)">
+      <S title="🚀 Rising Queries">
         <div>{d.risingQueries.map((k, i) => <Tag key={i} text={k} bg="#4ade8022" tc="#4ade80" />)}</div>
       </S>
     )}
     {d.autoSuggestions?.length > 0 && (
-      <S title="💡 Google Autocomplete Suggestions">
+      <S title="💡 Google Autocomplete">
         <div>{d.autoSuggestions.map((k, i) => <Tag key={i} text={k} bg="#fbbf2422" tc="#fbbf24" />)}</div>
       </S>
     )}
     {d.serpRelated?.length > 0 && (
-      <S title="🔗 SERP Related Searches">
+      <S title="🔗 SERP Related">
         <div>{d.serpRelated.map((k, i) => <Tag key={i} text={k} bg="#38bdf822" tc="#38bdf8" />)}</div>
       </S>
     )}
@@ -319,15 +342,14 @@ const KeywordPanel = ({ d, copy, t }) => (
 
 const MetaPanel = ({ d, copy, t }) => (
   <div>
-    {/* Competitor Insights */}
     {d.competitorTitles?.length > 0 && (
-      <div style={{ marginBottom: 20, padding: 14, background: "#f87171" + "11", border: "1px solid #f8717133", borderRadius: 8 }}>
-        <div style={{ fontSize: 11, fontWeight: 700, color: "#f87171", letterSpacing: 1, textTransform: "uppercase", marginBottom: 10 }}>🔍 Competitor Analysis (via ScraperAPI)</div>
+      <div style={{ marginBottom: 20, padding: 14, background: "#f8717111", border: "1px solid #f8717133", borderRadius: 8 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: "#f87171", letterSpacing: 1, textTransform: "uppercase", marginBottom: 10 }}>🔍 Competitor Analysis</div>
         {d.competitorTitles.map((ct, i) => (
           <div key={i} style={{ marginBottom: 8 }}>
-            <div style={{ fontSize: 10, color: t.subtext, marginBottom: 2 }}>Competitor {i + 1} Title:</div>
+            <div style={{ fontSize: 10, color: t.subtext, marginBottom: 2 }}>Competitor {i + 1}:</div>
             <div style={{ fontSize: 12, color: t.text, padding: "6px 10px", background: t.input, borderRadius: 6 }}>{ct}</div>
-            {d.competitorDescriptions[i] && (
+            {d.competitorDescriptions?.[i] && (
               <div style={{ fontSize: 11, color: t.subtext, padding: "4px 10px", fontStyle: "italic" }}>{d.competitorDescriptions[i]}</div>
             )}
           </div>
@@ -335,8 +357,8 @@ const MetaPanel = ({ d, copy, t }) => (
       </div>
     )}
     {[
-      { label: "Meta Title", key: "metaTitle", hint: `${d.metaTitle?.length}/60` },
-      { label: "Meta Description", key: "metaDescription", hint: `${d.metaDescription?.length}/155` },
+      { label: "Meta Title", key: "metaTitle", hint: `${d.metaTitle?.length || 0}/60` },
+      { label: "Meta Description", key: "metaDescription", hint: `${d.metaDescription?.length || 0}/155` },
       { label: "URL Slug", key: "slug" },
       { label: "OG Title", key: "ogTitle" },
       { label: "OG Description", key: "ogDescription" },
@@ -360,7 +382,7 @@ const DescPanel = ({ d, copy, t }) => (
     <S title="Headline"><div style={{ fontSize: 18, fontWeight: 700 }}>{d.headline}</div></S>
     <S title="Short Description"><div style={{ fontSize: 13, color: t.subtext, lineHeight: 1.7 }}>{d.shortDescription}</div></S>
     <S title="Long Description"><div style={{ fontSize: 13, color: t.subtext, lineHeight: 1.8 }}>{d.longDescription}</div></S>
-    <S title="Bullet Points">{d.bulletPoints.map((p, i) => <div key={i} style={{ padding: "5px 0", fontSize: 13, color: "#c4b5fd" }}>✦ {p}</div>)}</S>
+    <S title="Bullet Points">{(d.bulletPoints || []).map((p, i) => <div key={i} style={{ padding: "5px 0", fontSize: 13, color: "#c4b5fd" }}>✦ {p}</div>)}</S>
     <S title="CTA"><div style={{ display: "inline-block", padding: "10px 20px", background: "linear-gradient(135deg,#6366f1,#d946ef)", borderRadius: 8, fontWeight: 700, fontSize: 13 }}>{d.cta}</div></S>
     <CopyBtn onClick={() => copy(d)} />
   </div>
@@ -371,17 +393,17 @@ const SchemaPanel = ({ d, copy, t }) => (
     <S title="JSON-LD Schema">
       <div style={{ position: "relative" }}>
         <pre style={{ background: t.input, border: `1px solid ${t.inputBorder}`, borderRadius: 8, padding: 14, fontSize: 11, color: "#a5b4fc", overflow: "auto", margin: 0, lineHeight: 1.6 }}>
-          {JSON.stringify(d.jsonLd, null, 2)}
+          {JSON.stringify(d?.jsonLd || {}, null, 2)}
         </pre>
-        <button onClick={() => copy(d.jsonLd)} style={{ position: "absolute", top: 8, right: 8, padding: "5px 10px", background: t.muted, border: "none", borderRadius: 6, color: "#d946ef", cursor: "pointer", fontSize: 11 }}>📋 Copy</button>
+        <button onClick={() => copy(d?.jsonLd)} style={{ position: "absolute", top: 8, right: 8, padding: "5px 10px", background: t.muted, border: "none", borderRadius: 6, color: "#d946ef", cursor: "pointer", fontSize: 11 }}>📋 Copy</button>
       </div>
     </S>
     <S title="Breadcrumb">
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        {d.breadcrumb.map((b, i) => (
+        {(d?.breadcrumb || []).map((b, i) => (
           <span key={i} style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ fontSize: 12, color: "#c4b5fd", padding: "4px 10px", background: t.muted, borderRadius: 4 }}>{b}</span>
-            {i < d.breadcrumb.length - 1 && <span style={{ color: t.dim }}>›</span>}
+            {i < (d?.breadcrumb?.length - 1) && <span style={{ color: t.dim }}>›</span>}
           </span>
         ))}
       </div>

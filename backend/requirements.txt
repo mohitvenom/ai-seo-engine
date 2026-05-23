@@ -1,9 +1,11 @@
 fastapi
 uvicorn
 openai
-google-generativeai
+google-genai
 python-dotenv
 pydantic
 pytrends
 requests
 beautifulsoup4
+motor
+pymongo

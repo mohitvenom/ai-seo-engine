@@ -42,4 +42,4 @@ class PipelineResponse(BaseModel):
     keywords: KeywordOutput
     meta: MetaOutput
     description: DescriptionOutput
-    schema: SchemaOutput
+    schemaMarkup: SchemaOutput
