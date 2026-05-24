@@ -4,7 +4,7 @@ openai
 google-genai
 python-dotenv
 pydantic
-pytrends
+pytrends==4.9.2
 requests
 beautifulsoup4
 motor

@@ -38,8 +38,8 @@ def fetch_autocomplete(query: str) -> list:
 def fetch_trends(query: str) -> dict:
     try:
         import time
-        time.sleep(2)  # avoid rate limiting
-        pt = TrendReq(hl="en-US", tz=360, timeout=(10, 25), retries=2, backoff_factor=0.5)
+        time.sleep(2)
+        pt = TrendReq(hl="en-US", tz=360, timeout=(10, 25))
         pt.build_payload([query], timeframe="today 3-m")
         interest = pt.interest_over_time()
         score = round(float(interest[query].mean()), 1) if not interest.empty else 0.0
@@ -97,4 +97,3 @@ async def gather_meta_data(product: str, urls: list) -> dict:
     loop = asyncio.get_event_loop()
     competitor_meta = await loop.run_in_executor(None, fetch_competitor_meta, urls)
     return {"competitor_meta": competitor_meta}
-    
